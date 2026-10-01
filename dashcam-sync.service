@@ -1,0 +1,15 @@
+[Unit]
+Description=Sync 70mai dashcam clips to the NAS when its hotspot is in range
+After=network-online.target
+
+[Service]
+User=pi
+# NAS=user@host:/path  NASPORT=22  KEY=/home/pi/.ssh/dashcam_nas  (see README)
+EnvironmentFile=-/etc/default/dashcam-sync
+ExecStartPre=+/usr/sbin/iw dev wlan0 set power_save off
+ExecStart=/home/pi/dashcam_watch.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
