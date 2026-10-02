@@ -25,6 +25,7 @@ if "--gps" in sys.argv:
         if m:
             for sec in range(3): L.append(f"1790000000,A,51.9,-2.1,0,0,0,0,0,{k.split('/')[-1]},0,0,0")
     clips["/mnt/sd/GPSData000001.txt"]=("\n".join(L)+"\n").encode()
+STALL = sys.argv[sys.argv.index("--stall") + 1] if "--stall" in sys.argv else None
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version="HTTP/1.0"
     def log_message(self,*a): pass
@@ -38,7 +39,16 @@ class H(http.server.BaseHTTPRequestHandler):
             m=re.match(r"bytes=(\d+)-(\d*)",rng); s=int(m.group(1)); e=int(m.group(2)) if m.group(2) else e
         self.send_response(206 if rng else 200)
         self.send_header("Content-Length",str(e+1-s)); self.end_headers()
-        if not head: self.wfile.write(d[s:e+1])
+        if not head:
+            if STALL and STALL in p and self.command == "GET":     # --stall NAME: send a little, then trickle forever
+                import time
+                try:
+                    self.wfile.write(d[s:s+1000]); self.wfile.flush()
+                    while True:
+                        self.wfile.write(b"x"); self.wfile.flush(); time.sleep(1)
+                except OSError:
+                    return
+            self.wfile.write(d[s:e+1])
     def do_HEAD(self): self.do(True)
     def do_GET(self): self.do(False)
 http.server.ThreadingHTTPServer(("127.0.0.1",8099),H).serve_forever()

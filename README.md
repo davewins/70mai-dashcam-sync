@@ -58,6 +58,9 @@ queued clips that are already there, and skips ahead past the newest clip alread
   The tool takes as much as the window allows, oldest first, and carries on next time.
 - **Loop recording.** Unlocked clips are overwritten when the card fills (about a day of HD on a 120 GB card). Clips the
   Pi never got are only recoverable from the card. `import_card.py` copies a card in a reader at disk speed.
+- **A clip that will not download** (a trickle of data, or a stall) is abandoned after 20 seconds below about 100 KB/s, sent to the
+  back of the queue, and tried once per session. After 3 failed sessions it is given up on and listed in `status.txt`; copy it from
+  the card by hand (`import_card.py`) and the next sync notices it is on the NAS. A dead hotspot never counts against a clip.
 - A better radio helps: an external USB adapter or good placement near the garage.
 - Clips are recorded in the dashcam's local time and the tool assumes the Pi is in the same time zone.
 

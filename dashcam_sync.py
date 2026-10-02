@@ -125,6 +125,10 @@ def gps_index(cam, last_counter, max_bytes=16 << 20, older_than=None):
         chunk *= 4
     return {k: v for k, v in found.items() if k > last_counter}
 
+GIVE_UP = 3                                                       # clip-specific failures before a clip is left for a manual card copy
+STALL_SECS = float(os.environ.get("DASHCAM_STALL_SECS", "20"))   # a download that gets less than MIN_RATE for this long is abandoned
+MIN_RATE = 100 * 1024                                              # bytes/second
+
 def download(cam, path, dest, size):
     part = dest + ".part"
     have = os.path.getsize(part) if os.path.exists(part) else 0
@@ -140,10 +144,16 @@ def download(cam, path, dest, size):
             if r.status == 200 and have:          # server ignored the Range header
                 have = 0
             with open(part, "ab" if have else "wb") as f:
+                w0, wb = time.time(), 0
                 while True:
-                    b = r.read(1 << 20)
+                    b = r.read1(1 << 16)                  # returns whatever has arrived, so a trickle cannot hide a stall
                     if not b: break
-                    f.write(b)
+                    f.write(b); wb += len(b)
+                    el = time.time() - w0
+                    if el >= STALL_SECS:
+                        if wb < STALL_SECS * MIN_RATE:
+                            raise OSError(f"stalled: {wb // 1024} KB in {el:.0f}s")
+                        w0, wb = time.time(), 0
         finally:
             c.close()
     if os.path.getsize(part) != size:
@@ -216,6 +226,9 @@ def upload_status(target, dest, logfile, sessions):
         out.append("Hotspot alive time, last 5 sessions: " + ", ".join(f"{fm(n)} ({d[11:16]})" for d, n in durs[-5:]))
         recent = [n for _, n in durs[-20:]]
         out.append(f"Hotspot alive time, average of the last {len(recent)}: {fm(sum(recent) // len(recent))}, longest {fm(max(recent))}")
+    gaveup = [p["counter"] for p in pend if p.get("gave_up")]
+    if gaveup:
+        out.append("Clips given up on (copy them from the SD card): " + ", ".join(f"#{c}" for c in gaveup))
     if s24 and not pushed24:
         out.append("")
         out.append(f"WARNING: the hotspot appeared {len(s24)} times in the last 24 h but nothing was delivered.")
@@ -445,6 +458,8 @@ def main():
             log(f"found #{state['counter']} {FOLDER[prefix]} {t} front={size/1e6:.1f}MB rear={'-' if rear is None else f'{rear/1e6:.1f}MB'}")
         return n
 
+    session_bad = set()                       # clips that failed in this run: one try each per session, so one bad clip cannot eat the window
+
     def deliver():
         """Download (and push) everything pending. Returns False if something failed.
         Pushes to the NAS run in a background thread so the dashcam's WiFi is never idle waiting for the NAS."""
@@ -455,8 +470,11 @@ def main():
                                                path_for(p["prefix"], t, p["counter"], "F")[1] + ".part"))
         # Locked event/parking clips first, then unfinished downloads, then oldest first: the card overwrites its
         # oldest clips first when it fills, so those are the ones at risk.
-        todo = sorted((p for p in st["pending"] if p["prefix"] in want),
-                      key=lambda p: (PRIORITY[p["prefix"]], not has_part(p), p["counter"]))
+        todo = sorted((p for p in st["pending"] if p["prefix"] in want and not p.get("gave_up") and p["counter"] not in session_bad),
+                      key=lambda p: (PRIORITY[p["prefix"]], p.get("fails", 0), not has_part(p), p["counter"]))
+        gave_up = [p["counter"] for p in st["pending"] if p.get("gave_up")]
+        if gave_up:
+            log(f"not retrying {len(gave_up)} clip(s) that keep failing: " + ", ".join(f"#{c}" for c in gave_up) + " (copy them from the card)")
         log(f"{len(st['pending'])} clips pending, {len(todo)} of wanted types")
         if a.dry_run:
             return True
@@ -482,11 +500,19 @@ def main():
                     except (OSError, http.client.HTTPException) as e:
                         log(f"FAILED to push {name}: {e} - will retry next time")
                         ok = False
+        def dashcam_alive():
+            try:
+                cam.head("///mnt/sd/")
+                return True
+            except (OSError, http.client.HTTPException):
+                return False
         def run():
+            consecutive = 0
             for p in todo:
                 t = dt.datetime.strptime(p["time"], TFMT)
                 if p["counter"] == newest and (now - t).total_seconds() < 180:
                     log(f"skip #{p['counter']} (probably still recording)"); continue
+                bad_clip = False
                 for cam_id in ("F", "R"):
                     if not p[cam_id]: continue
                     path, name = path_for(p["prefix"], t, p["counter"], cam_id)
@@ -504,9 +530,21 @@ def main():
                         have0 = os.path.getsize(local + ".part") if os.path.exists(local + ".part") else 0
                         download(cam, path, local, size)
                         log(f"got {name} {size/1e6:.1f}MB at {(size-have0)/1e6/max(time.time()-s0,.01):.1f}MB/s")
+                        consecutive = 0
                     except (OSError, http.client.HTTPException) as e:
-                        log(f"FAILED {name}: {e} - will resume next time")
-                        return False
+                        if not dashcam_alive():                 # the hotspot went away: stop, nothing to blame on the clip
+                            log(f"FAILED {name}: {e} - the dashcam has gone, will resume next time")
+                            return False
+                        p["fails"] = p.get("fails", 0) + 1      # the dashcam is fine but this clip will not come: send it to the back
+                        log(f"FAILED {name}: {e} - the dashcam is still up, so skipping this clip for now (failure {p['fails']} of {GIVE_UP})")
+                        if p["fails"] >= GIVE_UP:
+                            p["gave_up"] = True
+                            log(f"giving up on #{p['counter']}: it keeps failing, so the card may have a bad area there. Copy it from the card by hand")
+                        save()
+                        session_bad.add(p["counter"])
+                        consecutive += 1
+                        bad_clip = True
+                        break
                     if pusher:
                         while inflight and ok:                  # at most one push queued behind the one running
                             reap(True)
@@ -516,6 +554,11 @@ def main():
                         reap(False)
                     else:
                         done_files.setdefault(p["counter"], set()).add(cam_id)
+                if bad_clip:
+                    if consecutive >= 3:
+                        log("three clips in a row failed; stopping this session")
+                        return False
+                    continue
                 check(p)
                 if not ok:
                     return False
