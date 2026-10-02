@@ -61,6 +61,22 @@ queued clips that are already there, and skips ahead past the newest clip alread
 - A better radio helps: an external USB adapter or good placement near the garage.
 - Clips are recorded in the dashcam's local time and the tool assumes the Pi is in the same time zone.
 
+## Checking on it remotely
+
+The Pi keeps a dated log (`~/dashcam/dashcam-sync.log`, trimmed to about 3 MB) and, after every sync and once an hour, uploads
+two files to the NAS next to your clips:
+
+```
+<NAS base>/_logs/status.txt          a short summary: newest clip, queue length, clips delivered in 24 h / 7 days,
+                                     failures, hotspot sessions, and WARNING lines (see below)
+<NAS base>/_logs/dashcam-sync.log    the recent log
+```
+
+Open them from wherever you already reach the NAS (a file browser, VPN, SFTP, a phone). `status.txt` warns when the hotspot has
+appeared in the last 24 hours but nothing was delivered, or when more than 40 clips are queued (the card only holds about a
+day, so it is time to pull it). If `status.txt` stops updating, the Pi, its network or the NAS is down. Tune with `STATUS_EVERY`
+(seconds, default 3600).
+
 ## Install on the Pi
 
 Requirements: Python 3.8+ (standard library only), OpenSSH `sftp`, `iw`, and WiFi (`wlan0`) that auto-joins the
@@ -83,8 +99,9 @@ dashcam network. Debian with `wpa_supplicant` and `dhcpcd` is what it was tested
    CFG
    ```
 
-   `CLIP_SECONDS` must match the dashcam's loop-recording length. `GW` (default `192.168.0.1`) and `DIR`
-   (default `~/dashcam`, the staging folder and state) can also be set.
+   `CLIP_SECONDS` must match the dashcam's loop-recording length. `GW` (default `192.168.0.1`), `DIR`
+   (default `~/dashcam`, the staging folder, state and log), `SYNC` (path to `dashcam_sync.py`, default `~/dashcam_sync.py`),
+   `FLUSH_EVERY` and `STATUS_EVERY` can also be set there.
 4. Start it and watch it work:
 
    ```bash
@@ -96,6 +113,12 @@ The first time the hotspot appears, the tool looks at the card's GPS log and the
 already delivered. For a brand new NAS folder it starts from the oldest clip still in the log. If the GPS log is not
 available, run `python3 dashcam_sync.py --seed NO20260930-205828-008704F.MP4 ...` once with the name of your newest clip.
 
+## Updating
+
+If you cloned this repository on the Pi, update with `git pull`, copy `dashcam_sync.py` and `dashcam_watch.sh` to your home
+folder (or point `SYNC` at the clone), and run `sudo systemctl restart dashcam-sync`. The state lives in `~/dashcam`, so
+nothing is lost.
+
 ## Command line
 
 ```
@@ -103,10 +126,12 @@ dashcam_sync.py [--gw IP] [--dest DIR] [--state FILE]
                 [--sftp user@host:/base --sftp-port N --sftp-key FILE]
                 [--seed CLIPNAME] [--types EV,PA,NO] [--clip-seconds 60]
                 [--no-gps] [--sessions FILE] [--dry-run] [--flush-only]
+                [--upload-status LOGFILE]
 ```
 
 - `--dry-run` finds and lists new clips but downloads nothing.
 - `--flush-only` pushes finished clips left in `--dest` to the NAS and does not touch the dashcam.
+- `--upload-status LOGFILE` writes `status.txt` and uploads it, with the log, to `<NAS base>/_logs/`, then exits.
 - Without `--sftp`, clips simply stay in `--dest`.
 - `--sessions` is a file of times the hotspot appeared (the watcher writes one). It is only used by the guessing
   fallback, to know when the dashcam was on.

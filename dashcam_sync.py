@@ -19,7 +19,8 @@ NAME_RE = re.compile(r"^(NO|PA|EV)(\d{8}-\d{6})-(\d{6})[FR]\.MP4$")
 TFMT = "%Y%m%d-%H%M%S"
 
 def log(*a):
-    print(time.strftime("%H:%M:%S"), *a, flush=True)
+    fmt = "%Y-%m-%d %H:%M:%S" if os.environ.get("DASHCAM_LOG_DATES") else "%H:%M:%S"   # the watcher's log file wants dates
+    print(time.strftime(fmt), *a, flush=True)
 
 class Cam:
     def __init__(self, gw, port):
@@ -168,6 +169,60 @@ def sftp_push(target, local, remote_rel):
     if r.returncode != 0:
         raise OSError("sftp failed: " + (r.stderr or r.stdout).strip()[-300:])
 
+def upload_status(target, dest, logfile, sessions):
+    """Write a short human-readable status.txt and a copy of the recent log to <NAS base>/_logs/ so the Pi can be checked
+    remotely. The log lines start with 'YYYY-MM-DD HH:MM:SS' (the watcher sets DASHCAM_LOG_DATES)."""
+    now = dt.datetime.now()
+    lines = []
+    if os.path.exists(logfile):
+        with open(logfile, errors="replace") as f:
+            lines = f.read().splitlines()[-5000:]
+    def stamp(l):
+        try: return dt.datetime.strptime(l[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError: return None
+    def count(word, hours):
+        n = 0
+        for l in lines:
+            t = stamp(l)
+            if t and (now - t).total_seconds() < hours * 3600 and re.search(r"\b" + word + r"\b", l[20:]):
+                n += 1
+        return n
+    sp = os.path.join(dest, "state.json")
+    st = json.load(open(sp)) if os.path.exists(sp) else {}
+    pend = st.get("pending", [])
+    stray = sum(1 for root, _, fs in os.walk(dest) for f in fs if NAME_RE.match(f))
+    sess = []
+    if sessions and os.path.exists(sessions):
+        for l in open(sessions):
+            try: sess.append(dt.datetime.strptime(l.strip(), "%Y-%m-%d %H:%M:%S"))
+            except ValueError: pass
+    s24 = [t for t in sess if (now - t).total_seconds() < 86400]
+    out = [f"Dashcam sync status at {now:%Y-%m-%d %H:%M:%S}", ""]
+    out.append(f"Newest clip seen: #{st.get('counter')} at {st.get('time')}")
+    out.append("Waiting in the queue: " + (f"{len(pend)} clips (#{min(p['counter'] for p in pend)}..#{max(p['counter'] for p in pend)})" if pend else "none"))
+    out.append(f"Finished clips stranded on the Pi (not yet on the NAS): {stray}")
+    pushed24 = count("pushed", 24) + count("flushed", 24)
+    out.append(f"Clips delivered to the NAS: last 24 h {pushed24}, last 7 days {count('pushed', 168) + count('flushed', 168)}")
+    out.append(f"Failures: last 24 h {count('FAILED', 24)}")
+    out.append(f"Hotspot sessions: last 24 h {len(s24)}; latest {sess[-1] if sess else 'never'}")
+    if s24 and not pushed24:
+        out.append("")
+        out.append(f"WARNING: the hotspot appeared {len(s24)} times in the last 24 h but nothing was delivered.")
+    if len(pend) > 40:
+        out.append("")
+        out.append(f"WARNING: {len(pend)} clips are queued. The card keeps about a day of footage, so pull the SD card soon.")
+    out += ["", "Last 15 log lines:"] + lines[-15:]
+    tmp = os.path.join(dest, ".status.tmp")
+    tmplog = os.path.join(dest, ".log.tmp")
+    open(tmp, "w").write("\n".join(out) + "\n")
+    open(tmplog, "w").write("\n".join(lines) + "\n")
+    try:
+        sftp_push(target, tmp, "_logs/status.txt")
+        sftp_push(target, tmplog, "_logs/dashcam-sync.log")
+    finally:
+        for p in (tmp, tmplog):
+            if os.path.exists(p): os.remove(p)
+
 def flush_local(target, dest):
     """Push every finished clip sitting under dest (YYYY-MM-DD/Type/NAME.MP4) to the NAS and delete the local copy.
     Needs no dashcam connection. Returns (pushed, failed)."""
@@ -230,12 +285,20 @@ def main():
     ap.add_argument("--sftp-port", type=int, default=22)
     ap.add_argument("--sftp-key", help="private key file for the SFTP login")
     ap.add_argument("--flush-only", action="store_true", help="just push finished clips left in --dest to the NAS; do not touch the dashcam")
+    ap.add_argument("--upload-status", metavar="LOGFILE", help="upload status.txt and the recent log to <NAS base>/_logs/ and exit")
     ap.add_argument("--no-gps", action="store_true", help="do not use the dashcam's GPS log as a clip index")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--max-clips", type=int, default=500)
     a = ap.parse_args()
     os.makedirs(a.dest, exist_ok=True)
     SFTP_EXTRA[:] = ["-P", str(a.sftp_port)] + (["-i", os.path.expanduser(a.sftp_key)] if a.sftp_key else [])
+    if a.upload_status:
+        if not a.sftp: sys.exit("--upload-status needs --sftp")
+        try:
+            upload_status(a.sftp, a.dest, a.upload_status, a.sessions)
+        except OSError as e:
+            sys.exit(f"status upload failed: {e}")
+        sys.exit(0)
     if a.flush_only or (a.sftp and not a.dry_run):
         if not a.sftp:
             sys.exit("--flush-only needs --sftp")
