@@ -205,6 +205,17 @@ def upload_status(target, dest, logfile, sessions):
     out.append(f"Clips delivered to the NAS: last 24 h {pushed24}, last 7 days {count('pushed', 168) + count('flushed', 168)}")
     out.append(f"Failures: last 24 h {count('FAILED', 24)}")
     out.append(f"Hotspot sessions: last 24 h {len(s24)}; latest {sess[-1] if sess else 'never'}")
+    durs = []
+    dp = os.path.join(dest, "hotspot_durations.log")
+    if os.path.exists(dp):
+        for l in open(dp):
+            try: durs.append((l[:19], int(l.split()[-1])))
+            except ValueError: pass
+    if durs:
+        fm = lambda n: f"{n // 60}m{n % 60:02d}s"
+        out.append("Hotspot alive time, last 5 sessions: " + ", ".join(f"{fm(n)} ({d[11:16]})" for d, n in durs[-5:]))
+        recent = [n for _, n in durs[-20:]]
+        out.append(f"Hotspot alive time, average of the last {len(recent)}: {fm(sum(recent) // len(recent))}, longest {fm(max(recent))}")
     if s24 and not pushed24:
         out.append("")
         out.append(f"WARNING: the hotspot appeared {len(s24)} times in the last 24 h but nothing was delivered.")

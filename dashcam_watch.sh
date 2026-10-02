@@ -14,6 +14,7 @@ FLUSH_EVERY=${FLUSH_EVERY:-300}          # while the hotspot is away, push stray
 STATUS_EVERY=${STATUS_EVERY:-3600}       # upload the log and status.txt to the NAS this often when idle (seconds)
 SESSIONS=$DIR/hotspot_sessions.log       # one line per hotspot appearance: YYYY-mm-dd HH:MM:SS
 LOG=$DIR/dashcam-sync.log                # dated log, uploaded to <NAS base>/_logs/
+DURATIONS=$DIR/hotspot_durations.log     # one line per hotspot session: "YYYY-mm-dd HH:MM:SS <seconds alive>"
 mkdir -p "$DIR"; touch "$SESSIONS" "$LOG"
 export DASHCAM_LOG_DATES=1               # makes dashcam_sync.py put the date on every log line
 
@@ -33,6 +34,27 @@ upload_status() {
   last_status=$(date +%s)
 }
 
+# Background pinger: the main loop is blocked while a sync runs, so it cannot time the hotspot itself. This records when
+# the dashcam first answered (.up_since) and when it last answered (.last_seen); three missed pings in a row = gone.
+touch "$DURATIONS"
+(
+  was=0; miss=0
+  while true; do
+    if ping -c1 -W1 "$GW" >/dev/null 2>&1; then
+      miss=0
+      [ $was = 0 ] && { date +%s > "$DIR/.up_since"; was=1; }
+      date +%s > "$DIR/.last_seen"
+    else
+      miss=$((miss+1)); [ $miss -ge 3 ] && was=0
+    fi
+    sleep 1
+  done
+) &
+PINGER=$!
+trap 'kill $PINGER 2>/dev/null' EXIT
+trap 'exit 143' TERM INT
+
+fmt() { printf '%dm%02ds' $(($1/60)) $(($1%60)); }
 in_session=0; synced=0; fails=0; last_flush=0; last_status=0
 say "dashcam_watch started; watching $GW"
 while true; do
@@ -52,7 +74,15 @@ while true; do
       upload_status
     fi
   else
-    if [ $in_session = 1 ]; then say "hotspot DOWN"; fi
+    if [ $in_session = 1 ]; then
+      a=$(cat "$DIR/.up_since" 2>/dev/null || echo 0); b=$(cat "$DIR/.last_seen" 2>/dev/null || echo 0)
+      if [ "$a" -gt 0 ] && [ "$b" -ge "$a" ]; then
+        say "hotspot DOWN after $(fmt $((b-a))) (up $(date -d @"$a" '+%T'), last seen $(date -d @"$b" '+%T'))"
+        echo "$(date -d @"$a" '+%F %T') $((b-a))" >> "$DURATIONS"
+      else
+        say "hotspot DOWN"
+      fi
+    fi
     in_session=0
     now=$(date +%s)
     if [ $((now - last_flush)) -ge $FLUSH_EVERY ]; then

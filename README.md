@@ -68,9 +68,13 @@ two files to the NAS next to your clips:
 
 ```
 <NAS base>/_logs/status.txt          a short summary: newest clip, queue length, clips delivered in 24 h / 7 days,
-                                     failures, hotspot sessions, and WARNING lines (see below)
+                                     failures, hotspot sessions and how long each stayed alive, and WARNING lines
 <NAS base>/_logs/dashcam-sync.log    the recent log
 ```
+
+The log also records how long the dashcam's hotspot stayed up, for example
+`hotspot DOWN after 3m41s (up 18:34:21, last seen 18:38:02)`. A background ping once a second times it, so the figure is accurate
+even though the main loop is busy syncing. Durations are kept in `~/dashcam/hotspot_durations.log` and summarised in `status.txt`.
 
 Open them from wherever you already reach the NAS (a file browser, VPN, SFTP, a phone). `status.txt` warns when the hotspot has
 appeared in the last 24 hours but nothing was delivered, or when more than 40 clips are queued (the card only holds about a
