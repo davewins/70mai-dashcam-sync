@@ -10,6 +10,7 @@ NAS=${NAS:?set NAS=user@host:/path in /etc/default/dashcam-sync}
 NASPORT=${NASPORT:-22}
 KEY=${KEY:-$HOME/.ssh/dashcam_nas}
 CLIP_SECONDS=${CLIP_SECONDS:-60}         # must match the dashcam's loop-recording length setting
+STATIONARY=${STATIONARY:-last}           # Normal clips recorded while the car did not move: last | skip | normal
 FLUSH_EVERY=${FLUSH_EVERY:-300}          # while the hotspot is away, push stray finished clips to the NAS this often (seconds)
 STATUS_EVERY=${STATUS_EVERY:-3600}       # upload the log and status.txt to the NAS this often when idle (seconds)
 SESSIONS=$DIR/hotspot_sessions.log       # one line per hotspot appearance: YYYY-mm-dd HH:MM:SS
@@ -67,7 +68,7 @@ while true; do
     fi
     if [ $synced = 0 ]; then
       say "starting sync"
-      timeout 3600 python3 "$SYNC" "${NASARGS[@]}" --dest "$DIR" --clip-seconds "$CLIP_SECONDS" --sessions "$SESSIONS" 2>&1 | tee -a "$LOG"
+      timeout 3600 python3 "$SYNC" "${NASARGS[@]}" --dest "$DIR" --clip-seconds "$CLIP_SECONDS" --stationary "$STATIONARY" --sessions "$SESSIONS" 2>&1 | tee -a "$LOG"
       rc=${PIPESTATUS[0]}
       say "sync finished rc=$rc"
       if [ $rc = 0 ]; then synced=1; else fails=$((fails+1)); [ $fails -ge 3 ] && synced=1; sleep 10; fi

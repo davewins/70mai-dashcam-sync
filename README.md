@@ -17,6 +17,11 @@ with 70mai, and other models or firmware may behave differently.
 - Finds new clips and downloads them with HTTP Range resume, so a dropped connection loses nothing.
 - Downloads event/parking clips first, then unfinished downloads, then everything else oldest first (the card
   overwrites its oldest clips first).
+- Uses the GPS log to tell clips recorded while driving from clips recorded while the car sat still (for example parked on
+  charge with the dashcam awake). Order is: event clips, parking clips, normal clips from driving, then normal clips recorded
+  stationary. Normal clips within two clips of an event or parking clip count as driving, since that is the footage around an
+  incident. Set `STATIONARY=skip` in `/etc/default/dashcam-sync` to leave stationary normal clips on the card, or
+  `STATIONARY=normal` to ignore movement. Event and parking clips are never skipped.
 - Pushes each clip to the NAS in a background thread while the next one downloads, as a `.part` file renamed when
   complete, so media servers never see half a file.
 - Works out where it is up to from the NAS itself, so there is nothing to seed and nothing to forget. It can recover
@@ -108,7 +113,7 @@ dashcam network. Debian with `wpa_supplicant` and `dhcpcd` is what it was tested
 
    `CLIP_SECONDS` must match the dashcam's loop-recording length. `GW` (default `192.168.0.1`), `DIR`
    (default `~/dashcam`, the staging folder, state and log), `SYNC` (path to `dashcam_sync.py`, default `~/dashcam_sync.py`),
-   `FLUSH_EVERY` and `STATUS_EVERY` can also be set there.
+   `FLUSH_EVERY`, `STATUS_EVERY` and `STATIONARY` can also be set there.
 4. Start it and watch it work:
 
    ```bash
@@ -132,7 +137,7 @@ nothing is lost.
 dashcam_sync.py [--gw IP] [--dest DIR] [--state FILE]
                 [--sftp user@host:/base --sftp-port N --sftp-key FILE]
                 [--seed CLIPNAME] [--types EV,PA,NO] [--clip-seconds 60]
-                [--no-gps] [--sessions FILE] [--dry-run] [--flush-only]
+                [--stationary last|skip|normal] [--moving-metres 40] [--no-gps] [--sessions FILE] [--dry-run] [--flush-only]
                 [--upload-status LOGFILE]
 ```
 

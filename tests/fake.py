@@ -23,7 +23,10 @@ if "--gps" in sys.argv:
     for k in sorted(clips):
         m=re.search(r"/(NO|EV)(\d{8}-\d{6})-(\d{6})F\.MP4",k)
         if m:
-            for sec in range(3): L.append(f"1790000000,A,51.9,-2.1,0,0,0,0,0,{k.split('/')[-1]},0,0,0")
+            cn = m.group(3)
+            moving = "--move" in sys.argv and cn in sys.argv[sys.argv.index("--move") + 1].split(",")
+            for sec in range(3):
+                L.append(f"1790000000,A,{51.9 + (sec * 0.0005 if moving else 0):.6f},-2.1,0,0,0,0,0,{k.split('/')[-1]},0,0,0")
     clips["/mnt/sd/GPSData000001.txt"]=("\n".join(L)+"\n").encode()
 STALL = sys.argv[sys.argv.index("--stall") + 1] if "--stall" in sys.argv else None
 class H(http.server.BaseHTTPRequestHandler):

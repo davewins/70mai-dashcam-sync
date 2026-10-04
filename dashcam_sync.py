@@ -129,6 +129,51 @@ GIVE_UP = 3                                                       # clip-specifi
 STALL_SECS = float(os.environ.get("DASHCAM_STALL_SECS", "20"))   # a download that gets less than MIN_RATE for this long is abandoned
 MIN_RATE = 100 * 1024                                              # bytes/second
 
+def gps_motion(cam, min_counter, metres=40.0, max_bytes=32 << 20):
+    """Read the tail of the GPS log back to clip min_counter-1 and say, per clip, whether the car moved during it
+    (more than `metres` from its first fix). Returns {counter: bool}; a clip with no valid GPS fix counts as moving.
+    Returns None if the log is not available."""
+    import math
+    size = cam.head(GPS_PATH)
+    if not size or size < 0:
+        return None
+    chunk = 512 << 10
+    while True:
+        start = max(0, size - chunk)
+        c, r = cam.req("GET", GPS_PATH, {"Range": f"bytes={start}-{size - 1}"}, timeout=30)
+        try:
+            data = r.read().decode("latin-1")
+            ok = r.status in (200, 206)
+        finally:
+            c.close()
+        if not ok:
+            return None
+        counters = [int(m.group(3)) for m in GPS_NAME.finditer(data)]
+        if start == 0 or (counters and min(counters) < min_counter) or chunk >= max_bytes:
+            break
+        chunk *= 4
+    first, maxd, seen = {}, {}, set()
+    for line in data.splitlines():
+        m = GPS_NAME.search(line)
+        if not m:
+            continue
+        n = int(m.group(3)); seen.add(n)
+        f = line.split(",")
+        if len(f) < 10 or f[1] != "A":
+            continue
+        try:
+            lat, lon = float(f[2]), float(f[3])
+        except ValueError:
+            continue
+        if n not in first:
+            first[n] = (lat, lon); maxd[n] = 0.0
+            continue
+        la0, lo0 = first[n]
+        d = math.hypot((lat - la0) * 111320.0, (lon - lo0) * 111320.0 * math.cos(math.radians(la0)))
+        if d > maxd[n]:
+            maxd[n] = d
+    return {n: (n not in first) or maxd[n] > metres for n in seen}
+
 def download(cam, path, dest, size):
     part = dest + ".part"
     have = os.path.getsize(part) if os.path.exists(part) else 0
@@ -210,6 +255,9 @@ def upload_status(target, dest, logfile, sessions):
     out = [f"Dashcam sync status at {now:%Y-%m-%d %H:%M:%S}", ""]
     out.append(f"Newest clip seen: #{st.get('counter')} at {st.get('time')}")
     out.append("Waiting in the queue: " + (f"{len(pend)} clips (#{min(p['counter'] for p in pend)}..#{max(p['counter'] for p in pend)})" if pend else "none"))
+    still = sum(1 for p in pend if p.get("moving") is False)
+    if still or st.get("skipped_stationary"):
+        out.append(f"Of those, recorded while stationary (fetched last): {still}; skipped as stationary so far: {st.get('skipped_stationary', 0)}")
     out.append(f"Finished clips stranded on the Pi (not yet on the NAS): {stray}")
     pushed24 = count("pushed", 24) + count("flushed", 24)
     out.append(f"Clips delivered to the NAS: last 24 h {pushed24}, last 7 days {count('pushed', 168) + count('flushed', 168)}")
@@ -310,6 +358,9 @@ def main():
     ap.add_argument("--sftp-key", help="private key file for the SFTP login")
     ap.add_argument("--flush-only", action="store_true", help="just push finished clips left in --dest to the NAS; do not touch the dashcam")
     ap.add_argument("--upload-status", metavar="LOGFILE", help="upload status.txt and the recent log to <NAS base>/_logs/ and exit")
+    ap.add_argument("--stationary", choices=["last", "skip", "normal"], default="last",
+                    help="Normal clips recorded while the car did not move (e.g. parked on charge): download them last (default), skip them, or treat them like any other")
+    ap.add_argument("--moving-metres", type=float, default=40.0, help="a clip counts as 'moving' if the car got further than this from where it started (default 40)")
     ap.add_argument("--no-gps", action="store_true", help="do not use the dashcam's GPS log as a clip index")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--max-clips", type=int, default=500)
@@ -458,11 +509,42 @@ def main():
             log(f"found #{state['counter']} {FOLDER[prefix]} {t} front={size/1e6:.1f}MB rear={'-' if rear is None else f'{rear/1e6:.1f}MB'}")
         return n
 
+    def fill_motion():
+        """Tag each queued Normal clip as moving / stationary using the GPS log (one-off per clip, saved in the state)."""
+        if a.stationary == "normal" or a.no_gps:
+            return
+        need = [p for p in st["pending"] if p["prefix"] == "NO" and "moving" not in p
+                and (now - dt.datetime.strptime(p["time"], TFMT)).total_seconds() > 180]   # a clip still being recorded is not judged yet
+        if not need:
+            return
+        try:
+            mv = gps_motion(cam, min(p["counter"] for p in need), a.moving_metres)
+        except (OSError, http.client.HTTPException) as e:
+            log(f"could not read GPS positions ({e}); not ordering by movement this time")
+            return
+        if mv is None:
+            return
+        events = {p["counter"] for p in st["pending"] if p["prefix"] in ("EV", "PA")}
+        for p in need:
+            c = p["counter"]
+            # a clip next to a moving one counts as moving too (stopped at lights, setting off, arriving), and so does any
+            # clip within two of an event/parking clip: that is the footage around an incident, even if the car was stationary
+            near_event = any(abs(c - e) <= 2 for e in events)
+            p["moving"] = True if (c not in mv or near_event) else bool(mv[c] or mv.get(c - 1) or mv.get(c + 1))
+        n_still = sum(1 for p in need if not p["moving"])
+        log(f"movement: {len(need) - n_still} of {len(need)} queued clips were recorded while driving, {n_still} while stationary")
+        if a.stationary == "skip" and n_still:
+            st["pending"] = [p for p in st["pending"] if p.get("moving", True)]
+            st["skipped_stationary"] = st.get("skipped_stationary", 0) + n_still
+            log(f"skipping the {n_still} stationary clips (--stationary skip)")
+        save()
+
     session_bad = set()                       # clips that failed in this run: one try each per session, so one bad clip cannot eat the window
 
     def deliver():
         """Download (and push) everything pending. Returns False if something failed.
         Pushes to the NAS run in a background thread so the dashcam's WiFi is never idle waiting for the NAS."""
+        fill_motion()
         newest = max((p["counter"] for p in st["pending"]), default=None)
         def has_part(p):                      # a half-downloaded clip resumes first so it actually finishes
             t = dt.datetime.strptime(p["time"], TFMT)
@@ -471,7 +553,7 @@ def main():
         # Locked event/parking clips first, then unfinished downloads, then oldest first: the card overwrites its
         # oldest clips first when it fills, so those are the ones at risk.
         todo = sorted((p for p in st["pending"] if p["prefix"] in want and not p.get("gave_up") and p["counter"] not in session_bad),
-                      key=lambda p: (PRIORITY[p["prefix"]], p.get("fails", 0), not has_part(p), p["counter"]))
+                      key=lambda p: (PRIORITY[p["prefix"]], p.get("moving") is False, p.get("fails", 0), not has_part(p), p["counter"]))
         gave_up = [p["counter"] for p in st["pending"] if p.get("gave_up")]
         if gave_up:
             log(f"not retrying {len(gave_up)} clip(s) that keep failing: " + ", ".join(f"#{c}" for c in gave_up) + " (copy them from the card)")
