@@ -469,8 +469,14 @@ def main():
     gps = {}
     if not a.no_gps:
         try:
-            gps = gps_index(cam, state["counter"]) or {}
-            log("GPS log not available" if not gps else f"GPS log index: {len(gps)} newer clips (#{min(gps)}..#{max(gps)})")
+            gps = gps_index(cam, state["counter"])
+            if gps is None:
+                log("GPS log not available on this dashcam; falling back to guessing")
+                gps = {}
+            elif gps:
+                log(f"GPS log index: {len(gps)} newer clips (#{min(gps)}..#{max(gps)})")
+            else:
+                log("GPS log: no clips newer than the last one we have")
         except (OSError, http.client.HTTPException) as e:
             log(f"GPS log not usable ({e}); falling back to guessing")
 
