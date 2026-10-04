@@ -529,6 +529,7 @@ def main():
             log(f"could not read GPS positions ({e}); not ordering by movement this time")
             return
         if mv is None:
+            log("GPS positions unavailable; not ordering by movement this time")
             return
         events = {p["counter"] for p in st["pending"] if p["prefix"] in ("EV", "PA")}
         for p in need:
