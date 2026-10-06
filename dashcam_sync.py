@@ -519,8 +519,9 @@ def main():
         """Tag each queued Normal clip as moving / stationary using the GPS log (one-off per clip, saved in the state)."""
         if a.stationary == "normal" or a.no_gps:
             return
+        t_now = dt.datetime.now()             # not the start-of-run time: clips found later in a long session must be judged too
         need = [p for p in st["pending"] if p["prefix"] == "NO" and "moving" not in p
-                and (now - dt.datetime.strptime(p["time"], TFMT)).total_seconds() > 180]   # a clip still being recorded is not judged yet
+                and (t_now - dt.datetime.strptime(p["time"], TFMT)).total_seconds() > 180]   # a clip still being recorded is not judged yet
         if not need:
             return
         try:
@@ -559,7 +560,11 @@ def main():
                                                path_for(p["prefix"], t, p["counter"], "F")[1] + ".part"))
         # Locked event/parking clips first, then unfinished downloads, then oldest first: the card overwrites its
         # oldest clips first when it fills, so those are the ones at risk.
-        todo = sorted((p for p in st["pending"] if p["prefix"] in want and not p.get("gave_up") and p["counter"] not in session_bad),
+        def too_new_to_judge(p):              # --stationary skip: wait until the clip is old enough to know whether the car moved
+            return (a.stationary == "skip" and not a.no_gps and p["prefix"] == "NO" and "moving" not in p
+                    and (dt.datetime.now() - dt.datetime.strptime(p["time"], TFMT)).total_seconds() <= 180)
+        todo = sorted((p for p in st["pending"] if p["prefix"] in want and not p.get("gave_up") and p["counter"] not in session_bad
+                       and not too_new_to_judge(p)),
                       key=lambda p: (PRIORITY[p["prefix"]], p.get("moving") is False, p.get("fails", 0), not has_part(p), p["counter"]))
         gave_up = [p["counter"] for p in st["pending"] if p.get("gave_up")]
         if gave_up:
