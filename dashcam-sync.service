@@ -6,7 +6,7 @@ After=network-online.target
 User=pi
 # NAS=user@host:/path  NASPORT=22  KEY=/home/pi/.ssh/dashcam_nas  (see README)
 EnvironmentFile=-/etc/default/dashcam-sync
-ExecStartPre=+/usr/sbin/iw dev wlan0 set power_save off
+ExecStartPre=+/bin/sh -c '/usr/sbin/iw dev $${WIFI_IF:-wlan0} set power_save off || true'
 ExecStart=/home/pi/dashcam_watch.sh
 Restart=always
 RestartSec=10

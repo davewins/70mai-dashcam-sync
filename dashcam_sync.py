@@ -282,7 +282,7 @@ def upload_status(target, dest, logfile, sessions):
         out.append(f"WARNING: the hotspot appeared {len(s24)} times in the last 24 h but nothing was delivered.")
     if len(pend) > 40:
         out.append("")
-        out.append(f"WARNING: {len(pend)} clips are queued. The card keeps about a day of footage, so pull the SD card soon.")
+        out.append(f"WARNING: {len(pend)} clips are queued. The card holds only about 12 hours of continuous recording, so pull the SD card soon.")
     out += ["", "Last 15 log lines:"] + lines[-15:]
     tmp = os.path.join(dest, ".status.tmp")
     tmplog = os.path.join(dest, ".log.tmp")

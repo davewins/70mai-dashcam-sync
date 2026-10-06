@@ -21,7 +21,8 @@ with 70mai, and other models or firmware may behave differently.
   charge with the dashcam awake). Order is: event clips, parking clips, normal clips from driving, then normal clips recorded
   stationary. Normal clips within two clips of an event or parking clip count as driving, since that is the footage around an
   incident. Set `STATIONARY=skip` in `/etc/default/dashcam-sync` to leave stationary normal clips on the card, or
-  `STATIONARY=normal` to ignore movement. Event and parking clips are never skipped.
+  `STATIONARY=normal` to ignore movement. Event and parking clips are never skipped. A normal clip is only judged once it is
+  three minutes old (it is still being recorded before that), and with `skip` it is held back until then.
 - Pushes each clip to the NAS in a background thread while the next one downloads, as a `.part` file renamed when
   complete, so media servers never see half a file.
 - Works out where it is up to from the NAS itself, so there is nothing to seed and nothing to forget. It can recover
@@ -60,14 +61,46 @@ queued clips that are already there, and skips ahead past the newest clip alread
 - **WiFi window.** In parking mode (for example with the OBD hardwire kit) the dashcam switches its hotspot off a few
   minutes after the engine stops. The window is roughly 1 to 4 minutes, and the dashcam's WiFi is slow (about 1 to 7 MB/s depending on the
   radio). At HD that is only a handful of one-minute clips per drive, so this will not mirror a long journey on its own.
-  The tool takes as much as the window allows, oldest first, and carries on next time.
-- **Loop recording.** Unlocked clips are overwritten when the card fills (about a day of HD on a 120 GB card). Clips the
-  Pi never got are only recoverable from the card. `import_card.py` copies a card in a reader at disk speed.
+  The tool takes as much as the window allows, oldest first, and carries on next time. See "Keeping the dashcam awake" below
+  for ways to get a longer window.
+- **Loop recording.** Unlocked clips are overwritten when the card fills. A minute of HD front plus rear is about 170 MB, so a
+  120 GB card holds roughly 12 hours of continuous recording, and a dashcam that is awake but parked still records at that rate.
+  Clips the Pi never got are only recoverable from the card. `import_card.py` copies a card in a reader at disk speed.
 - **A clip that will not download** (a trickle of data, or a stall) is abandoned after 20 seconds below about 100 KB/s, sent to the
   back of the queue, and tried once per session. After 3 failed sessions it is given up on and listed in `status.txt`; copy it from
   the card by hand (`import_card.py`) and the next sync notices it is on the NAS. A dead hotspot never counts against a clip.
-- A better radio helps: an external USB adapter or good placement near the garage.
+- WiFi range matters a lot, see "Getting a fast link" below.
 - Clips are recorded in the dashcam's local time and the tool assumes the Pi is in the same time zone.
+
+## Keeping the dashcam awake
+
+The hotspot only exists while the dashcam is awake and not in parking mode. Two things keep it up for hours:
+
+- **Charging a plug-in hybrid or EV.** The car is awake while it charges, so the dashcam stays in normal mode and the hotspot
+  can stay up for hours. That is the best time to sync, but it also records about 10 GB an hour of the stationary garage, which
+  is why `STATIONARY=skip` is worth having.
+- **A USB battery pack** on the dashcam, with the car off. In the dashcam's settings, "auto off when parked" can be set to
+  "never" for this. A 3 to 5 W dashcam runs for several hours on a typical power bank. Use the wired output, not a wireless
+  charging pad, and remember that the card is being overwritten at 10 GB an hour the whole time, so use it to catch up and then
+  put the dashcam back on car power. Setting "never" may also stop parking mode (and so Parking/Event clips): test it first.
+
+## Getting a fast link
+
+The dashcam's hotspot is 2.4 GHz only, so range and position matter far more than the radio's headline speed. Measured on one Pi:
+about 14 KB/s with the Pi behind a metal garage door, 0.4 to 1.7 MB/s a metre or two away from the metal, and 2 to 2.6 MB/s with an
+external USB adapter and a clear line of sight (the dashcam itself managed 6.9 MB/s to a laptop held next to it).
+
+- Put the Pi, or just its aerial, where it can see the car without metal in between. Measure rather than guess:
+  `iw dev wlan0 link` (look at `signal` and `rx bitrate`; better than -65 dBm is good, -78 dBm is slow) and
+  `curl -m 15 -o /dev/null -w "%{speed_download} bytes/s\n" -r 0-5000000 "http://192.168.0.1///mnt/sd/GPSData000001.txt"`
+  (stop the service first so the two do not compete).
+- The dashcam picks its own channel and has been seen on both 2 and 11. A strong neighbour on the same channel slows it.
+- A USB adapter with an external aerial helps if the Pi's own radio is the weak point. Choose one with a driver already in the
+  Linux kernel (MediaTek MT7612U or MT7610U, Ralink RT5372, Atheros AR9271) and avoid Realtek and AIC8800 dongles that need a driver
+  compiled on the Pi: it is rebuilt on every kernel update and breaks silently. A short USB extension lets you place the aerial.
+- With a second adapter, join the dashcam on the new interface only, and set `WIFI_IF` (for example `wlan1`) in
+  `/etc/default/dashcam-sync` so power saving is switched off on the right one. The watcher finds the dashcam by pinging it, so it
+  works on any interface.
 
 ## Checking on it remotely
 
@@ -85,14 +118,14 @@ The log also records how long the dashcam's hotspot stayed up, for example
 even though the main loop is busy syncing. Durations are kept in `~/dashcam/hotspot_durations.log` and summarised in `status.txt`.
 
 Open them from wherever you already reach the NAS (a file browser, VPN, SFTP, a phone). `status.txt` warns when the hotspot has
-appeared in the last 24 hours but nothing was delivered, or when more than 40 clips are queued (the card only holds about a
-day, so it is time to pull it). If `status.txt` stops updating, the Pi, its network or the NAS is down. Tune with `STATUS_EVERY`
+appeared in the last 24 hours but nothing was delivered, or when more than 40 clips are queued (the card only holds about
+12 hours of recording, so it is time to pull it). If `status.txt` stops updating, the Pi, its network or the NAS is down. Tune with `STATUS_EVERY`
 (seconds, default 3600).
 
 ## Install on the Pi
 
-Requirements: Python 3.8+ (standard library only), OpenSSH `sftp`, `iw`, and WiFi (`wlan0`) that auto-joins the
-dashcam network. Debian with `wpa_supplicant` and `dhcpcd` is what it was tested on.
+Requirements: Python 3.8+ (standard library only), OpenSSH `sftp`, `iw`, and WiFi (`wlan0` by default, see `WIFI_IF`) that
+auto-joins the dashcam network. Debian with `wpa_supplicant` and `dhcpcd` is what it was tested on.
 
 1. Join the dashcam's hotspot automatically, but keep ethernet as the default route. For `dhcpcd`, add `nogateway`
    for `wlan0` in `/etc/dhcpcd.conf`. Add the dashcam's SSID and password to `/etc/wpa_supplicant/wpa_supplicant.conf`.
@@ -113,7 +146,7 @@ dashcam network. Debian with `wpa_supplicant` and `dhcpcd` is what it was tested
 
    `CLIP_SECONDS` must match the dashcam's loop-recording length. `GW` (default `192.168.0.1`), `DIR`
    (default `~/dashcam`, the staging folder, state and log), `SYNC` (path to `dashcam_sync.py`, default `~/dashcam_sync.py`),
-   `FLUSH_EVERY`, `STATUS_EVERY` and `STATIONARY` can also be set there.
+   `FLUSH_EVERY`, `STATUS_EVERY`, `STATIONARY` and `WIFI_IF` (default `wlan0`) can also be set there.
 4. Start it and watch it work:
 
    ```bash

@@ -1,8 +1,8 @@
 #!/bin/bash
-# dashcam_watch.sh - runs forever (as a systemd service). When the dashcam hotspot is up and wlan0 is joined to it,
+# dashcam_watch.sh - runs forever (as a systemd service). When the dashcam hotspot is up and the WiFi is joined to it,
 # runs dashcam_sync.py once, then waits for the hotspot to go away before arming again.
 # Also keeps a dated log file and uploads it (plus a short status.txt) to <NAS base>/_logs/ so you can check on it remotely.
-# Needs wlan0 to auto-join the dashcam (saved in wpa_supplicant) - see the README.
+# Needs WiFi (wlan0, or WIFI_IF) to auto-join the dashcam (saved in wpa_supplicant) - see the README.
 GW=${GW:-192.168.0.1}
 DIR=${DIR:-$HOME/dashcam}
 SYNC=${SYNC:-$HOME/dashcam_sync.py}
