@@ -223,6 +223,24 @@ def sftp_push(target, local, remote_rel):
                        text=True, capture_output=True)
     if r.returncode != 0:
         raise OSError("sftp failed: " + (r.stderr or r.stdout).strip()[-300:])
+    if not remote_rel.startswith("_logs/"):
+        announce_clip(remote, remote_rel, local)
+
+def announce_clip(remote, rel, local):
+    """Tell Home Assistant (MQTT) that a clip is on the NAS. 'path' is as the SFTP server sees it; 'nas_path' adds
+    MQTT_NAS_PREFIX (for example /mnt) to give the path on the NAS host. Never raises."""
+    try:
+        import dashcam_mqtt
+        parts = rel.split("/")
+        info = {"file": parts[-1], "date": parts[0], "type": parts[1] if len(parts) > 2 else "",
+                "path": remote, "nas_path": os.environ.get("MQTT_NAS_PREFIX", "") + remote,
+                "size": os.path.getsize(local) if os.path.exists(local) else None,
+                "pushed_at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+        payload = json.dumps(info)
+        pre = os.environ.get("MQTT_PREFIX", "dashcam")
+        dashcam_mqtt.publish_many([(pre + "/clip", payload, False), (pre + "/last_clip", payload, True)])
+    except Exception as e:
+        log(f"mqtt announce failed: {e}")
 
 def upload_status(target, dest, logfile, sessions):
     """Write a short human-readable status.txt and a copy of the recent log to <NAS base>/_logs/ so the Pi can be checked
@@ -291,9 +309,49 @@ def upload_status(target, dest, logfile, sessions):
     try:
         sftp_push(target, tmp, "_logs/status.txt")
         sftp_push(target, tmplog, "_logs/dashcam-sync.log")
+        try: publish_status(dest, logfile, sessions)
+        except Exception as e: log(f"mqtt status failed: {e}")
     finally:
         for p in (tmp, tmplog):
             if os.path.exists(p): os.remove(p)
+
+def publish_status(dest, logfile, sessions, extra=None):
+    """Publish a retained JSON summary to <MQTT_PREFIX>/status (the same figures as status.txt, in machine form)."""
+    import dashcam_mqtt
+    now = dt.datetime.now()
+    lines = []
+    if os.path.exists(logfile):
+        with open(logfile, errors="replace") as f:
+            lines = f.read().splitlines()[-5000:]
+    def count(word, hours):
+        n = 0
+        for l in lines:
+            try: t = dt.datetime.strptime(l[:19], "%Y-%m-%d %H:%M:%S")
+            except ValueError: continue
+            if (now - t).total_seconds() < hours * 3600 and re.search(r"\b" + word + r"\b", l[20:]): n += 1
+        return n
+    sp = os.path.join(dest, "state.json")
+    st = json.load(open(sp)) if os.path.exists(sp) else {}
+    pend = st.get("pending", [])
+    stray = sum(1 for root, _, fs in os.walk(dest) for f in fs if NAME_RE.match(f))
+    last_push = None
+    for l in reversed(lines):
+        if re.search(r"\b(pushed|flushed)\b", l[20:]) and l[:4].isdigit():
+            last_push = l[:19]; break
+    sess_last = None
+    if sessions and os.path.exists(sessions):
+        rows = [l.strip() for l in open(sessions) if l.strip()]
+        sess_last = rows[-1] if rows else None
+    info = {"updated": now.astimezone().isoformat(timespec="seconds"),
+            "queued": len(pend), "stray_on_pi": stray, "skipped_stationary": st.get("skipped_stationary", 0),
+            "given_up": sum(1 for p in pend if p.get("gave_up")),
+            "delivered_24h": count("pushed", 24) + count("flushed", 24),
+            "delivered_7d": count("pushed", 168) + count("flushed", 168),
+            "failures_24h": count("FAILED", 24),
+            "newest_clip": st.get("counter"), "last_push": last_push, "last_hotspot": sess_last}
+    info.update(extra or {})
+    pre = os.environ.get("MQTT_PREFIX", "dashcam")
+    return dashcam_mqtt.publish_many([(pre + "/status", json.dumps(info), True)])
 
 def flush_local(target, dest):
     """Push every finished clip sitting under dest (YYYY-MM-DD/Type/NAME.MP4) to the NAS and delete the local copy.
@@ -357,6 +415,7 @@ def main():
     ap.add_argument("--sftp-port", type=int, default=22)
     ap.add_argument("--sftp-key", help="private key file for the SFTP login")
     ap.add_argument("--flush-only", action="store_true", help="just push finished clips left in --dest to the NAS; do not touch the dashcam")
+    ap.add_argument("--publish-status", metavar="LOGFILE", help="publish the status summary to MQTT only and exit")
     ap.add_argument("--upload-status", metavar="LOGFILE", help="upload status.txt and the recent log to <NAS base>/_logs/ and exit")
     ap.add_argument("--stationary", choices=["last", "skip", "normal"], default="last",
                     help="Normal clips recorded while the car did not move (e.g. parked on charge): download them last (default), skip them, or treat them like any other")
@@ -367,6 +426,8 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.dest, exist_ok=True)
     SFTP_EXTRA[:] = ["-P", str(a.sftp_port)] + (["-i", os.path.expanduser(a.sftp_key)] if a.sftp_key else [])
+    if a.publish_status:
+        sys.exit(0 if publish_status(a.dest, a.publish_status, a.sessions) else 1)
     if a.upload_status:
         if not a.sftp: sys.exit("--upload-status needs --sftp")
         try:

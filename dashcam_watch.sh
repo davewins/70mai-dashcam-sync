@@ -18,10 +18,16 @@ LOG=$DIR/dashcam-sync.log                # dated log, uploaded to <NAS base>/_lo
 DURATIONS=$DIR/hotspot_durations.log     # one line per hotspot session: "YYYY-mm-dd HH:MM:SS <seconds alive>"
 mkdir -p "$DIR"; touch "$SESSIONS" "$LOG"
 export DASHCAM_LOG_DATES=1               # makes dashcam_sync.py put the date on every log line
+export MQTT_HOST MQTT_PORT MQTT_USER MQTT_PASS MQTT_PREFIX MQTT_NAS_PREFIX   # optional: set MQTT_HOST to publish to Home Assistant
+HEARTBEAT_EVERY=${HEARTBEAT_EVERY:-300}  # with MQTT on, publish the status summary this often (seconds)
+MQTT_PY=$(dirname "$SYNC")/dashcam_mqtt.py
 
 NASARGS=(--sftp "$NAS" --sftp-port "$NASPORT" --sftp-key "$KEY")
 
 say() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }     # also goes to journald
+mq() { [ -n "$MQTT_HOST" ] && { timeout 15 python3 "$MQTT_PY" "$@" 2>>"$LOG" || true; }; return 0; }   # mq SUFFIX PAYLOAD [--retain]
+now_iso() { date '+%FT%T%z'; }
+heartbeat() { [ -n "$MQTT_HOST" ] && { timeout 30 python3 "$SYNC" --publish-status "$LOG" --sessions "$SESSIONS" --dest "$DIR" 2>>"$LOG" || true; }; last_hb=$(date +%s); return 0; }
 up() { ping -c1 -W1 "$GW" >/dev/null 2>&1; }
 trim_log() {                                              # keep the log under about 3 MB
   if [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 3000000 ]; then
@@ -56,8 +62,9 @@ trap 'kill $PINGER 2>/dev/null' EXIT
 trap 'exit 143' TERM INT
 
 fmt() { printf '%dm%02ds' $(($1/60)) $(($1%60)); }
-in_session=0; synced=0; fails=0; last_flush=0; last_status=0
+in_session=0; synced=0; fails=0; last_flush=0; last_status=0; last_hb=0
 say "dashcam_watch started; watching $GW"
+mq watcher "{\"state\":\"started\",\"at\":\"$(now_iso)\"}" --retain; heartbeat
 while true; do
   if up; then
     if [ $in_session = 0 ]; then
@@ -65,15 +72,19 @@ while true; do
       prev=$(tail -n1 "$SESSIONS")                  # start of the previous hotspot session = when the car last set off
       date '+%F %T' >> "$SESSIONS"
       say "hotspot UP (previous session started: ${prev:-none})"
+      mq hotspot "{\"state\":\"up\",\"at\":\"$(now_iso)\"}" --retain
     fi
     if [ $synced = 0 ]; then
       say "starting sync"
+      mq sync "{\"state\":\"running\",\"at\":\"$(now_iso)\"}" --retain
       timeout 3600 python3 "$SYNC" "${NASARGS[@]}" --dest "$DIR" --clip-seconds "$CLIP_SECONDS" --stationary "$STATIONARY" --sessions "$SESSIONS" 2>&1 | tee -a "$LOG"
       rc=${PIPESTATUS[0]}
       say "sync finished rc=$rc"
+      mq sync "{\"state\":\"finished\",\"rc\":$rc,\"at\":\"$(now_iso)\"}" --retain
       if [ $rc = 0 ]; then synced=1; else fails=$((fails+1)); [ $fails -ge 3 ] && synced=1; sleep 10; fi
       upload_status
     fi
+    [ $(( $(date +%s) - last_hb )) -ge $HEARTBEAT_EVERY ] && heartbeat
   else
     if [ $in_session = 1 ]; then
       a=$(cat "$DIR/.up_since" 2>/dev/null || echo 0); b=$(cat "$DIR/.last_seen" 2>/dev/null || echo 0)
@@ -84,8 +95,10 @@ while true; do
         say "hotspot DOWN"
       fi
     fi
+    [ $in_session = 1 ] && mq hotspot "{\"state\":\"down\",\"at\":\"$(now_iso)\",\"alive_seconds\":$((${b:-0}-${a:-0}))}" --retain
     in_session=0
     now=$(date +%s)
+    [ $((now - last_hb)) -ge $HEARTBEAT_EVERY ] && heartbeat
     if [ $((now - last_flush)) -ge $FLUSH_EVERY ]; then
       last_flush=$now
       if find "$DIR" -name '*.MP4' -print -quit 2>/dev/null | grep -q .; then
