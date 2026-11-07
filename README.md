@@ -122,6 +122,15 @@ appeared in the last 24 hours but nothing was delivered, or when more than 40 cl
 12 hours of recording, so it is time to pull it). If `status.txt` stops updating, the Pi, its network or the NAS is down. Tune with `STATUS_EVERY`
 (seconds, default 3600).
 
+## Home Assistant and a clip viewer
+
+Set `MQTT_HOST`, `MQTT_USER`, `MQTT_PASS` (and optionally `MQTT_PORT`, `MQTT_PREFIX`, `MQTT_NAS_PREFIX`) in
+`/etc/default/dashcam-sync` and the Pi publishes to MQTT using only the standard library (`dashcam_mqtt.py`, copy it next to
+`dashcam_sync.py`): `dashcam/status` (retained, every 5 minutes), `dashcam/last_clip` (retained) and `dashcam/clip` (one JSON
+message per clip delivered, with its NAS path), plus `dashcam/hotspot`, `dashcam/sync` and `dashcam/watcher`. Use them for a
+"nothing delivered for N days" alert. To browse the clips on the NAS, see
+[dashcam-viewer](https://github.com/davewins/dashcam-viewer).
+
 ## Install on the Pi
 
 Requirements: Python 3.8+ (standard library only), OpenSSH `sftp`, `iw`, and WiFi (`wlan0` by default, see `WIFI_IF`) that
