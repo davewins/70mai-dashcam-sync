@@ -123,8 +123,10 @@ def gps_index(cam, last_counter, max_bytes=16 << 20, older_than=None):
         if start == 0 or done or chunk >= max_bytes:
             break
         chunk *= 4
+    GPS_SEEN.clear(); GPS_SEEN.update(found)
     return {k: v for k, v in found.items() if k > last_counter}
 
+GPS_SEEN = {}      # everything the last gps_index() call saw, so main can notice a reformatted card (counter restarted)
 GIVE_UP = 3                                                       # clip-specific failures before a clip is left for a manual card copy
 STALL_SECS = float(os.environ.get("DASHCAM_STALL_SECS", "20"))   # a download that gets less than MIN_RATE for this long is abandoned
 MIN_RATE = 100 * 1024                                              # bytes/second
@@ -531,6 +533,17 @@ def main():
     if not a.no_gps:
         try:
             gps = gps_index(cam, state["counter"])
+            if gps == {} and GPS_SEEN and max(GPS_SEEN) < state["counter"]:
+                # the dashcam's newest clip number is BELOW ours: the card was reformatted/replaced and the counter restarted.
+                first = min(GPS_SEEN)
+                log(f"dashcam counter restarted (its newest is #{max(GPS_SEEN)}, we had #{state['counter']}): new card; "
+                    f"restarting from #{first}")
+                t_first = GPS_SEEN[first][1]
+                state["counter"] = first - 1; state["prev_t"] = t_first - dt.timedelta(minutes=1)
+                st["counter"], st["time"] = state["counter"], state["prev_t"].strftime(TFMT)
+                st["pending"] = [p for p in st["pending"] if p["counter"] < first]   # old-card leftovers cannot be fetched anyway
+                save()
+                gps = {k: v for k, v in GPS_SEEN.items() if k > state["counter"]}
             if gps is None:
                 log("GPS log not available on this dashcam; falling back to guessing")
                 gps = {}
