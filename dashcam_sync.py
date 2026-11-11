@@ -516,6 +516,33 @@ def main():
                 st["pending"] = [p for p in st["pending"] if p["counter"] > newest]
                 save()
     want = a.types.split(",")
+
+    # --- per-hotspot-session report, published (retained) to <prefix>/session for Home Assistant ---
+    sess_key = ""
+    if a.sessions and os.path.exists(a.sessions):
+        rows = [l.strip() for l in open(a.sessions) if l.strip()]
+        sess_key = rows[-1] if rows else ""
+    sess_path = os.path.join(a.dest, "session.json")
+    try:
+        sess = json.load(open(sess_path))
+    except (OSError, ValueError):
+        sess = {}
+    if sess.get("key") != sess_key:           # a new hotspot session: start the counts again
+        sess = {"key": sess_key, "started": sess_key, "total": 0, "done": 0, "failed": 0, "skipped_stationary": 0,
+                "normal": 0, "parking": 0, "event": 0, "parking_found": 0, "event_found": 0}
+    sess["runs"] = sess.get("runs", 0) + 1
+
+    def sess_update(phase=None, **kw):
+        if phase: sess["phase"] = phase
+        sess.update(kw)
+        sess["updated"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        try:
+            json.dump(sess, open(sess_path, "w"))
+            import dashcam_mqtt
+            dashcam_mqtt.publish_many([(os.environ.get("MQTT_PREFIX", "dashcam") + "/session", json.dumps(sess), True)])
+        except Exception as e:
+            log(f"session report failed: {e}")
+    sess_update("connecting")
     state = {"counter": st["counter"], "prev_t": dt.datetime.strptime(st["time"], TFMT)}
     log(f"last known clip: #{state['counter']} at {state['prev_t']}")
     t0 = time.time()
@@ -618,6 +645,7 @@ def main():
         if a.stationary == "skip" and n_still:
             st["pending"] = [p for p in st["pending"] if p.get("moving", True)]
             st["skipped_stationary"] = st.get("skipped_stationary", 0) + n_still
+            sess["skipped_stationary"] = sess.get("skipped_stationary", 0) + n_still
             log(f"skipping the {n_still} stationary clips (--stationary skip)")
         save()
 
@@ -644,6 +672,9 @@ def main():
         if gave_up:
             log(f"not retrying {len(gave_up)} clip(s) that keep failing: " + ", ".join(f"#{c}" for c in gave_up) + " (copy them from the card)")
         log(f"{len(st['pending'])} clips pending, {len(todo)} of wanted types")
+        sess_update("syncing", total=sess["done"] + sess["failed"] + len(todo),
+                    parking_found=sess["parking"] + sum(1 for p in todo if p["prefix"] == "PA"),
+                    event_found=sess["event"] + sum(1 for p in todo if p["prefix"] == "EV"))
         if a.dry_run:
             return True
         done_files, inflight, pusher, ok = {}, [], (ThreadPoolExecutor(1) if a.sftp else None), True
@@ -652,6 +683,8 @@ def main():
             need = {c for c in ("F", "R") if p[c]}
             if need <= done_files.get(p["counter"], set()) and p in st["pending"]:
                 st["pending"].remove(p); save()
+                sess["done"] += 1; sess[FOLDER[p["prefix"]].lower()] += 1
+                sess_update()
         def push_and_delete(local, rel):
             sftp_push(a.sftp, local, rel)
             os.remove(local)
@@ -710,6 +743,7 @@ def main():
                             log(f"giving up on #{p['counter']}: it keeps failing, so the card may have a bad area there. Copy it from the card by hand")
                         save()
                         session_bad.add(p["counter"])
+                        sess["failed"] += 1
                         consecutive += 1
                         bad_clip = True
                         break
@@ -744,15 +778,18 @@ def main():
         while True:
               n = discover(pool, full=False)            # cheap: next clip is ~60 s after the last one
               if not deliver():
+                  sess_update("stopped")
                   break
               if n:
                   continue
               log("quick search found nothing new; doing the slow search (parking/event clips)")
               if not discover(pool, full=True):
                   log(f"caught up ({time.time() - t0:.0f}s)")
+                  sess_update("done")
                   break
     except (OSError, http.client.HTTPException) as e:
         log(f"dashcam went away: {e}")
+        sess_update("stopped")
         sys.exit(1)
     log("done")
 
